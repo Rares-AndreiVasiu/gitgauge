@@ -1,13 +1,17 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.responses import RedirectResponse
 from fastapi import Request
 import httpx
 import os
 from dotenv import load_dotenv
+import json
+import requests 
 
 load_dotenv()
 
 app = FastAPI()
+
+user_data = {}
 
 CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
@@ -18,7 +22,7 @@ GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_API_USER_URL = "https://api.github.com/user"
 
 # OPTIONAL: Scopes you want to request
-SCOPES = "read:user user:email"
+SCOPES = "read:user user:email public_repo"
 
 ##
 ## 1) Login redirect
@@ -69,8 +73,55 @@ async def auth_callback(code: str = None, state: str = None):
     if not access_token:
         raise HTTPException(400, "No access token in response")
 
+    # Optional: Use token to get user info
+    async with httpx.AsyncClient() as client:
+        user_resp = await client.get(
+            GITHUB_API_USER_URL,
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+        user_resp.raise_for_status()
+        user_json = user_resp.json()
+
+    user_data[access_token] = user_json
+    
+
     return {
         "access_token": access_token,
-        "user": user_json
+        "user_json": user_json
     }
 
+
+
+##
+## 3) Dependency to get bearer token
+##
+async def get_bearer_token(authorization: str = Header(None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Authorization header must be Bearer token")
+    return authorization.split(" ", 1)[1]
+    
+
+
+
+@app.get("/repos/list")
+async def list_repos(token: str = Depends(get_bearer_token)):
+    """
+    Lists public repositories of the authenticated user.
+    """
+    url = f"https://api.github.com/user/repos?visibility=public"
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}"
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=headers)
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+    return resp.json()
+    
