@@ -1,4 +1,13 @@
-uv run uvicorn app:app --reload --host 0.0.0.0 --port 8000
-TO DO:
-- /login endpoint check state "random" string unique
-- .../archive/refs/heads/master.zip
+# GitGauge
+
+## Quick Start
+
+**Build and start:**
+```bash
+docker compose build && docker compose up -d
+```
+
+**Stop:**
+```bash
+docker compose down
+```
