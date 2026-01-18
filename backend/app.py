@@ -48,6 +48,66 @@ async def get_login_url():
     return {"auth_url": str(url)}
 
 
+GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code"
+GITHUB_DEVICE_TOKEN_URL = "https://github.com/login/oauth/access_token"
+
+
+@app.post("/auth/device/initiate")
+async def initiate_device_flow():
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            GITHUB_DEVICE_CODE_URL,
+            data={
+                "client_id": CLIENT_ID,
+                "scope": SCOPES,
+            },
+            headers={"Accept": "application/json"},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+@app.post("/auth/device/poll")
+async def poll_device_flow(device_code: str = Query(..., description="Device code from initiate endpoint")):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            GITHUB_DEVICE_TOKEN_URL,
+            data={
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "device_code": device_code,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            },
+            headers={"Accept": "application/json"},
+        )
+        
+        if response.status_code == 200:
+            token_data = response.json()
+            access_token = token_data.get("access_token")
+            if access_token:
+                async with httpx.AsyncClient() as user_client:
+                    user_response = await user_client.get(
+                        GITHUB_API_USER_URL,
+                        headers={"Authorization": f"Bearer {access_token}"},
+                    )
+                    user_response.raise_for_status()
+                    user_data = user_response.json()
+                    return {
+                        "access_token": access_token,
+                        "user": user_data,
+                    }
+        
+        error_data = response.json()
+        error = error_data.get("error", "unknown_error")
+        
+        if error == "authorization_pending":
+            return {"status": "pending"}
+        elif error == "slow_down":
+            return {"status": "slow_down"}
+        else:
+            raise HTTPException(status_code=400, detail=error_data)
+
+
 @app.get("/auth/callback")
 async def auth_callback(code: str = None, state: str = None):
     if not code:
@@ -107,8 +167,11 @@ async def list_repos(token: str = Depends(get_bearer_token)):
     
     return [
         {
-            "owner": repo["owner"]["login"],
-            "repo": repo["name"]
+            "id": repo.get("id", 0),
+            "name": repo.get("name", ""),
+            "description": repo.get("description"),
+            "html_url": repo.get("html_url", ""),
+            "stargazers_count": repo.get("stargazers_count", 0)
         }
         for repo in repos
     ]
