@@ -1,9 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Optional
+from typing import Dict
 import os
 from groq import Groq
-import json
 import logging
 
 logging.basicConfig(level=logging.INFO)

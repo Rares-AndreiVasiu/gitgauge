@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException, Header, Depends, Query
 from fastapi.responses import RedirectResponse
-from fastapi import Request
 import httpx
 import os
 from dotenv import load_dotenv
