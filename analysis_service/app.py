@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, func
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 from models import Base, Analysis
+from cache import get_cached_analysis, set_cached_analysis, delete_cached_analysis
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -221,8 +222,18 @@ async def analyze_code(request: AnalyzeRequest):
         logger.info(f"Number of files: {len(request.contents)}")
         logger.info(f"Force reanalysis: {request.force_reanalysis}")
         
+        if request.force_reanalysis:
+            delete_cached_analysis(request.owner, request.repo, request.ref)
+            logger.info("Deleted Redis cache entry for force reanalysis")
+        
         if not request.force_reanalysis:
             try:
+                cached_result = get_cached_analysis(request.owner, request.repo, request.ref)
+                if cached_result:
+                    logger.info("Returning cached analysis from Redis")
+                    db.close()
+                    return cached_result
+                
                 cached_analysis = db.query(Analysis).filter(
                     Analysis.owner == request.owner,
                     Analysis.repo == request.repo,
@@ -230,7 +241,7 @@ async def analyze_code(request: AnalyzeRequest):
                 ).first()
                 
                 if cached_analysis:
-                    logger.info("Returning cached analysis")
+                    logger.info("Found analysis in database, storing in Redis cache")
                     result = {
                         "summary": cached_analysis.summary or cached_analysis.analysis.split("\n")[0] if cached_analysis.analysis else "Analysis completed",
                         "analysis": cached_analysis.analysis,
@@ -244,6 +255,8 @@ async def analyze_code(request: AnalyzeRequest):
                         },
                         "cached": True
                     }
+                    cache_ttl = int(os.getenv("CACHE_TTL_SECONDS", "86400"))
+                    set_cached_analysis(request.owner, request.repo, request.ref, result, cache_ttl)
                     db.close()
                     return result
             except Exception as e:
@@ -408,6 +421,10 @@ Synthesize these summaries into a comprehensive analysis."""
                 logger.info("Stored new analysis in database")
             
             db.commit()
+            
+            cache_ttl = int(os.getenv("CACHE_TTL_SECONDS", "86400"))
+            set_cached_analysis(request.owner, request.repo, request.ref, result, cache_ttl)
+            logger.info("Stored analysis in Redis cache")
         except SQLAlchemyError as e:
             logger.error(f"Error storing analysis in database: {str(e)}")
             db.rollback()
