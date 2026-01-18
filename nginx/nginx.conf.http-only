@@ -2,7 +2,7 @@ upstream backend {
     server backend:8000;
 }
 
-# HTTP server - redirect to HTTPS and handle Let's Encrypt challenges
+# HTTP server - used initially before SSL certificates are obtained
 server {
     listen 80;
     server_name gitgauge.reuron.com;
@@ -11,35 +11,6 @@ server {
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
     }
-
-    # Redirect all other HTTP traffic to HTTPS
-    location / {
-        return 301 https://$host$request_uri;
-    }
-}
-
-# HTTPS server
-server {
-    listen 443 ssl;
-    http2 on;
-    server_name gitgauge.reuron.com;
-
-    # SSL certificate paths (mounted from host)
-    ssl_certificate /etc/letsencrypt/live/gitgauge.reuron.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/gitgauge.reuron.com/privkey.pem;
-
-    # SSL configuration
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-
-    # Security headers
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
 
     # Increase body size limit for large file uploads/requests
     client_max_body_size 100M;
