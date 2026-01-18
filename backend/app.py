@@ -4,9 +4,11 @@ from fastapi import Request
 import httpx
 import os
 from dotenv import load_dotenv
-import json
-import requests
-import base64 
+import base64
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__) 
 
 load_dotenv()
 
@@ -14,45 +16,32 @@ app = FastAPI()
 
 CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
-APP_URL = os.getenv("APP_URL")  # e.g. http://localhost:8000
+APP_URL = os.getenv("APP_URL")
 
 GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_API_USER_URL = "https://api.github.com/user"
 
-# OPTIONAL: Scopes you want to request
 SCOPES = "read:user user:email public_repo"
 
-##
-## 1) Login redirect
-##
+
 @app.get("/login")
 async def login():
-    """
-    Redirect the user to GitHub's OAuth authorize page.
-    """
     params = {
         "client_id": CLIENT_ID,
         "redirect_uri": f"{APP_URL}/auth/callback",
        "scope": SCOPES,
-        "state": "random_csrf_state",   # For CSRF protection in production
+        "state": "random_csrf_state",
     }
     url = httpx.URL(GITHUB_AUTHORIZE_URL, params=params)
     return RedirectResponse(str(url))
 
 
-##
-## 2) GitHub callback
-##
 @app.get("/auth/callback")
 async def auth_callback(code: str = None, state: str = None):
-    """
-    This endpoint is called by GitHub after the user authorized.
-    """
     if not code:
         raise HTTPException(400, "No code provided")
 
-    # Exchange the code for an access token
     async with httpx.AsyncClient() as client:
         headers = {"Accept": "application/json"}
         token_resp = await client.post(
@@ -78,9 +67,6 @@ async def auth_callback(code: str = None, state: str = None):
 
 
 
-##
-## 3) Dependency to get bearer token
-##
 async def get_bearer_token(authorization: str = Header(None)):
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
@@ -93,10 +79,6 @@ async def get_bearer_token(authorization: str = Header(None)):
 
 @app.get("/repos/list")
 async def list_repos(token: str = Depends(get_bearer_token)):
-    """
-    Lists public repositories of the authenticated user.
-    Returns a list of dictionaries with 'owner' and 'repo' keys.
-    """
     url = f"https://api.github.com/user/repos?visibility=public"
 
     headers = {
@@ -112,7 +94,6 @@ async def list_repos(token: str = Depends(get_bearer_token)):
 
     repos = resp.json()
     
-    # Extract only owner and repo name
     return [
         {
             "owner": repo["owner"]["login"],
@@ -122,24 +103,18 @@ async def list_repos(token: str = Depends(get_bearer_token)):
     ]
 
 
-@app.get("/repos/{owner}/{repo}/contents")
 async def get_repo_contents(
     owner: str,
     repo: str,
-    ref: str = Query("", description="Branch, tag, or commit SHA (defaults to default branch)"),
-    token: str = Depends(get_bearer_token)
-):
-    """
-    Gets all source code contents of a repository recursively.
-    Returns a JSON object with file paths as keys and file contents as values.
-    """
+    ref: str,
+    token: str
+) -> tuple[dict, str]:
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {token}"
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Get repository info to determine default branch if ref not provided
         if not ref:
             repo_resp = await client.get(
                 f"https://api.github.com/repos/{owner}/{repo}",
@@ -150,14 +125,10 @@ async def get_repo_contents(
             repo_info = repo_resp.json()
             ref = repo_info.get("default_branch", "main")
         
-        # Check if ref looks like a commit SHA (40 hex characters)
-        # If so, use it directly; otherwise try as branch/tag
         commit_sha = None
         if len(ref) == 40 and all(c in '0123456789abcdef' for c in ref.lower()):
-            # Looks like a commit SHA, use it directly
             commit_sha = ref
         else:
-            # Try as branch first
             ref_resp = await client.get(
                 f"https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{ref}",
                 headers=headers
@@ -167,7 +138,6 @@ async def get_repo_contents(
                 ref_data = ref_resp.json()
                 commit_sha = ref_data["object"]["sha"]
             else:
-                # Try as tag
                 ref_resp = await client.get(
                     f"https://api.github.com/repos/{owner}/{repo}/git/ref/tags/{ref}",
                     headers=headers
@@ -176,10 +146,8 @@ async def get_repo_contents(
                     ref_data = ref_resp.json()
                     commit_sha = ref_data["object"]["sha"]
                 else:
-                    # Try as commit SHA anyway (might be short SHA)
                     commit_sha = ref
         
-        # Get the commit to get tree SHA
         commit_resp = await client.get(
             f"https://api.github.com/repos/{owner}/{repo}/git/commits/{commit_sha}",
             headers=headers
@@ -190,7 +158,6 @@ async def get_repo_contents(
         commit_data = commit_resp.json()
         tree_sha = commit_data["tree"]["sha"]
         
-        # Get recursive tree
         tree_resp = await client.get(
             f"https://api.github.com/repos/{owner}/{repo}/git/trees/{tree_sha}",
             headers=headers,
@@ -201,14 +168,12 @@ async def get_repo_contents(
         
         tree_data = tree_resp.json()
         
-        # Filter for files (blobs) only
         files = [item for item in tree_data.get("tree", []) if item.get("type") == "blob"]
         
         if not files:
-            return {}
+            raise HTTPException(status_code=404, detail="No files found in repository")
         
-        # Fetch blob contents for each file
-        result = {}
+        repo_contents = {}
         for file_item in files:
             file_path = file_item["path"]
             blob_sha = file_item["sha"]
@@ -219,25 +184,67 @@ async def get_repo_contents(
             )
             
             if blob_resp.status_code != 200:
-                # Skip files that can't be fetched
                 continue
             
             blob_data = blob_resp.json()
             
-            # Decode base64 content if present
             if blob_data.get("encoding") == "base64" and "content" in blob_data:
                 try:
                     decoded_content = base64.b64decode(blob_data["content"]).decode("utf-8")
-                    result[file_path] = decoded_content
+                    repo_contents[file_path] = decoded_content
                 except (UnicodeDecodeError, ValueError):
-                    # Skip binary files that can't be decoded as UTF-8
                     continue
                 except Exception as e:
-                    # Skip files with other decoding errors
                     continue
             else:
-                # If no content or different encoding, skip
                 continue
         
-        return result
+        return repo_contents, ref
+
+
+@app.post("/repos/{owner}/{repo}/analyze")
+async def analyze_repo(
+    owner: str,
+    repo: str,
+    ref: str = Query("", description="Branch, tag, or commit SHA (defaults to default branch)"),
+    token: str = Depends(get_bearer_token)
+):
+    repo_contents, actual_ref = await get_repo_contents(owner, repo, ref, token)
+    
+    analysis_service_url = os.getenv("ANALYSIS_SERVICE_URL", "http://analysis-service:8001")
+    analysis_endpoint = f"{analysis_service_url}/analyze"
+    
+    logger.info(f"Calling analysis service at: {analysis_endpoint}")
+    logger.info(f"Repository: {owner}/{repo}, Ref: {actual_ref}, Files: {len(repo_contents)}")
+    
+    analysis_payload = {
+        "owner": owner,
+        "repo": repo,
+        "ref": actual_ref,
+        "contents": repo_contents
+    }
+    
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        try:
+            logger.info(f"Sending POST request to {analysis_endpoint}")
+            analysis_resp = await client.post(
+                analysis_endpoint,
+                json=analysis_payload,
+                timeout=180.0
+            )
+            logger.info(f"Analysis service response status: {analysis_resp.status_code}")
+            analysis_resp.raise_for_status()
+            return analysis_resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Analysis service HTTP error: {e.response.status_code} - {e.response.text}")
+            raise HTTPException(
+                status_code=e.response.status_code,
+                detail=f"Analysis service error: {e.response.text}"
+            )
+        except httpx.RequestError as e:
+            logger.error(f"Analysis service connection error: {str(e)}")
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to connect to analysis service at {analysis_endpoint}: {str(e)}"
+            )
 
