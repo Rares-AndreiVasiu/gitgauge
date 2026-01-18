@@ -29,11 +29,23 @@ async def login():
     params = {
         "client_id": CLIENT_ID,
         "redirect_uri": f"{APP_URL}/auth/callback",
-       "scope": SCOPES,
+        "scope": SCOPES,
         "state": "random_csrf_state",
     }
     url = httpx.URL(GITHUB_AUTHORIZE_URL, params=params)
     return RedirectResponse(str(url))
+
+
+@app.get("/login/url")
+async def get_login_url():
+    params = {
+        "client_id": CLIENT_ID,
+        "redirect_uri": f"{APP_URL}/auth/callback",
+        "scope": SCOPES,
+        "state": "random_csrf_state",
+    }
+    url = httpx.URL(GITHUB_AUTHORIZE_URL, params=params)
+    return {"auth_url": str(url)}
 
 
 @app.get("/auth/callback")
