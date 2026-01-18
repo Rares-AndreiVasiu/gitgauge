@@ -5,6 +5,8 @@ import os
 from dotenv import load_dotenv
 import base64
 import logging
+import zipfile
+import io
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__) 
@@ -188,7 +190,7 @@ async def get_repo_contents(
         "Authorization": f"Bearer {token}"
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         if not ref:
             repo_resp = await client.get(
                 f"https://api.github.com/repos/{owner}/{repo}",
@@ -199,79 +201,50 @@ async def get_repo_contents(
             repo_info = repo_resp.json()
             ref = repo_info.get("default_branch", "main")
         
-        commit_sha = None
-        if len(ref) == 40 and all(c in '0123456789abcdef' for c in ref.lower()):
-            commit_sha = ref
-        else:
-            ref_resp = await client.get(
-                f"https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{ref}",
-                headers=headers
+        archive_url = f"https://github.com/{owner}/{repo}/archive/refs/heads/{ref}.zip"
+        
+        archive_resp = await client.get(archive_url, headers=headers, follow_redirects=True)
+        
+        if archive_resp.status_code != 200:
+            raise HTTPException(
+                status_code=archive_resp.status_code,
+                detail=f"Failed to download archive: {archive_resp.text}"
             )
-            
-            if ref_resp.status_code == 200:
-                ref_data = ref_resp.json()
-                commit_sha = ref_data["object"]["sha"]
-            else:
-                ref_resp = await client.get(
-                    f"https://api.github.com/repos/{owner}/{repo}/git/ref/tags/{ref}",
-                    headers=headers
-                )
-                if ref_resp.status_code == 200:
-                    ref_data = ref_resp.json()
-                    commit_sha = ref_data["object"]["sha"]
-                else:
-                    commit_sha = ref
         
-        commit_resp = await client.get(
-            f"https://api.github.com/repos/{owner}/{repo}/git/commits/{commit_sha}",
-            headers=headers
-        )
-        if commit_resp.status_code != 200:
-            raise HTTPException(status_code=commit_resp.status_code, detail=f"Invalid ref: {ref}")
-        
-        commit_data = commit_resp.json()
-        tree_sha = commit_data["tree"]["sha"]
-        
-        tree_resp = await client.get(
-            f"https://api.github.com/repos/{owner}/{repo}/git/trees/{tree_sha}",
-            headers=headers,
-            params={"recursive": "1"}
-        )
-        if tree_resp.status_code != 200:
-            raise HTTPException(status_code=tree_resp.status_code, detail=tree_resp.text)
-        
-        tree_data = tree_resp.json()
-        
-        files = [item for item in tree_data.get("tree", []) if item.get("type") == "blob"]
-        
-        if not files:
-            raise HTTPException(status_code=404, detail="No files found in repository")
-        
+        zip_data = archive_resp.content
         repo_contents = {}
-        for file_item in files:
-            file_path = file_item["path"]
-            blob_sha = file_item["sha"]
-            
-            blob_resp = await client.get(
-                f"https://api.github.com/repos/{owner}/{repo}/git/blobs/{blob_sha}",
-                headers=headers
-            )
-            
-            if blob_resp.status_code != 200:
-                continue
-            
-            blob_data = blob_resp.json()
-            
-            if blob_data.get("encoding") == "base64" and "content" in blob_data:
-                try:
-                    decoded_content = base64.b64decode(blob_data["content"]).decode("utf-8")
-                    repo_contents[file_path] = decoded_content
-                except (UnicodeDecodeError, ValueError):
-                    continue
-                except Exception as e:
-                    continue
-            else:
-                continue
+        
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zip_file:
+                prefix = f"{repo}-{ref}/"
+                
+                for file_info in zip_file.filelist:
+                    if file_info.is_dir():
+                        continue
+                    
+                    file_path = file_info.filename
+                    
+                    if not file_path.startswith(prefix):
+                        continue
+                    
+                    relative_path = file_path[len(prefix):]
+                    
+                    try:
+                        file_content = zip_file.read(file_path).decode('utf-8')
+                        repo_contents[relative_path] = file_content
+                    except (UnicodeDecodeError, ValueError):
+                        continue
+                    except Exception as e:
+                        logger.warning(f"Error reading file {relative_path}: {e}")
+                        continue
+        
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="Invalid zip file received from GitHub")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error processing zip file: {str(e)}")
+        
+        if not repo_contents:
+            raise HTTPException(status_code=404, detail="No files found in repository archive")
         
         return repo_contents, ref
 
