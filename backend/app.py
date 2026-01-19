@@ -254,6 +254,7 @@ async def analyze_repo(
     owner: str,
     repo: str,
     ref: str = Query("", description="Branch, tag, or commit SHA (defaults to default branch)"),
+    force_reanalysis: bool = Query(False, description="Force reanalysis even if cached result exists"),
     token: str = Depends(get_bearer_token)
 ):
     repo_contents, actual_ref = await get_repo_contents(owner, repo, ref, token)
@@ -262,13 +263,14 @@ async def analyze_repo(
     analysis_endpoint = f"{analysis_service_url}/analyze"
     
     logger.info(f"Calling analysis service at: {analysis_endpoint}")
-    logger.info(f"Repository: {owner}/{repo}, Ref: {actual_ref}, Files: {len(repo_contents)}")
+    logger.info(f"Repository: {owner}/{repo}, Ref: {actual_ref}, Files: {len(repo_contents)}, Force reanalysis: {force_reanalysis}")
     
     analysis_payload = {
         "owner": owner,
         "repo": repo,
         "ref": actual_ref,
-        "contents": repo_contents
+        "contents": repo_contents,
+        "force_reanalysis": force_reanalysis
     }
     
     async with httpx.AsyncClient(timeout=180.0) as client:
